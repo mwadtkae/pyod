@@ -1,73 +1,100 @@
-from fastapi import FastAPI, UploadFile, File
-import pandas as pd
+import os
+import json
+import joblib
+from typing import Any, Dict, List, Optional, Union
+
 import numpy as np
-from pyod.models.iforest import IForest
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Body
 
-app = FastAPI()
+from test import format_for_output
 
-model = None
-feature_count = None
+app = FastAPI(title="PyOD Timesheet Scoring Service (RAW)", version="3.0")
 
-@app.get("/")
+BASE_DIR = os.path.dirname(__file__)
+MODEL_DIR = os.path.join(BASE_DIR)
+
+# ---- PIN YOUR MODEL FILE HERE ----
+PINNED_MODEL_NAME = "hbos_raw_20260129_173937.joblib"
+PINNED_META_NAME  = "hbos_raw_20260129_173937.meta.json"
+
+PINNED_MODEL_PATH = os.path.join(MODEL_DIR, PINNED_MODEL_NAME)
+PINNED_META_PATH  = os.path.join(MODEL_DIR, PINNED_META_NAME)
+
+MODEL = None
+META: Dict[str, Any] = {}
+
+@app.on_event("startup")
+def startup():
+    global MODEL, META
+
+    if not os.path.exists(PINNED_MODEL_PATH):
+        raise RuntimeError(f"Pinned model not found: {PINNED_MODEL_PATH}")
+
+    MODEL = joblib.load(PINNED_MODEL_PATH)
+
+    META = {}
+    if os.path.exists(PINNED_META_PATH):
+        with open(PINNED_META_PATH, "r", encoding="utf-8") as f:
+            META = json.load(f)
+
+    print("Loaded RAW model:", PINNED_MODEL_PATH)
+
+@app.get("/health")
 def health():
-    return {"status": "PyOD anomaly service ready"}
+    return {"status": "ok"}
 
-# -------- TRAIN (CSV or Excel) --------
+def extract_entries(payload: Union[List[Dict[str, Any]], Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Accept either raw list OR {entries:[...]}
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        entries = payload.get("entries") or payload.get("rows") or payload.get("data")
+        if isinstance(entries, list):
+            return entries
+    raise HTTPException(status_code=400, detail="Expected a JSON array or {entries:[...]}")
 
-@app.post("/train")
-async def train_model(file: UploadFile = File(...)):
-    global model, feature_count
+def normalise(entries: List[Dict[str, Any]]) -> np.ndarray:
+    """
+    RAW scoring: each entry -> one feature vector [hours]
+    Date is accepted but not used (you asked RAW entries).
+    """
+    hours = []
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            raise HTTPException(status_code=400, detail=f"Entry {i} must be an object")
 
-    filename = file.filename.lower()
+        # Accept aliases
+        h = (
+            e.get("hours")
+            or e.get("Time in hours")
+            or e.get("Time")
+            or e.get("time_in_hours")
+        )
+        if h is None:
+            raise HTTPException(status_code=400, detail=f"Entry {i} missing 'hours'")
 
-    if filename.endswith(".csv"):
-        df = pd.read_csv(file.file)
-    elif filename.endswith(".xlsx") or filename.endswith(".xls"):
-        df = pd.read_excel(file.file)
-    else:
-        return {"error": "Upload CSV or Excel file only"}
+        try:
+            hours.append(float(h))
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Entry {i} invalid hours: {h}")
 
-    # keep numeric columns only
-    df = df.select_dtypes(include=[np.number])
+    X = np.array(hours, dtype=float).reshape(-1, 1)
+    return X
 
-    if df.empty:
-        return {"error": "No numeric columns found"}
+@app.post("/score_entries")
+def score_entries(payload: Union[List[Dict[str, Any]], Dict[str, Any]] = Body(...)):
+    if MODEL is None:
+        raise HTTPException(status_code=500, detail="Model not loaded")
 
-    X = df.values
-    feature_count = X.shape[1]
+    entries = extract_entries(payload)
+    X = normalise(entries)
 
-    model = IForest(
-        n_estimators=200,
-        contamination=0.05,
-        random_state=42
-    )
-
-    model.fit(X)
-
-    return {
-        "status": "trained",
-        "rows": X.shape[0],
-        "features": feature_count
-    }
-
-# -------- DETECT ANOMALIES --------
-
-@app.post("/detect")
-def detect(data: list):
-    if model is None:
-        return {"error": "Train model first"}
-
-    X = np.array(data)
-
-    if X.shape[1] != feature_count:
-        return {
-            "error": f"Expected {feature_count} features, got {X.shape[1]}"
-        }
-
-    preds = model.predict(X)
-    scores = model.decision_function(X)
+    # PyOD outputs
+    scores = MODEL.decision_function(X)   # anomaly scores (float)
+    flags = MODEL.predict(X).astype(int)  # 1 = outlier, 0 = normal
 
     return {
-        "anomaly": preds.tolist(),
-        "score": scores.tolist()
+        "flagged": flags.tolist(),
+        "scores": scores.tolist()
     }
