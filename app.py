@@ -7,8 +7,6 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Body
 
-from test import format_for_output
-
 app = FastAPI(title="PyOD Timesheet Scoring Service (RAW)", version="3.0")
 
 BASE_DIR = os.path.dirname(__file__)
@@ -98,3 +96,4 @@ def score_entries(payload: Union[List[Dict[str, Any]], Dict[str, Any]] = Body(..
         "flagged": flags.tolist(),
         "scores": scores.tolist()
     }
+
