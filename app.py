@@ -29,7 +29,7 @@ app = FastAPI(title="Timesheet Scoring Service", version="1.0")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_MODEL_PATHS = [
-    os.path.join(BASE_DIR, "models", "halfthreshold_model.pkl"),
+    os.path.join(BASE_DIR, "halfthreshold_model.pkl"),
     os.path.join(BASE_DIR, "halfthreshold_model.pkl"),
 ]
 
@@ -451,3 +451,4 @@ def run_script():
         }
     finally:
         _script_lock.release()
+
