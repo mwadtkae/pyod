@@ -29,7 +29,7 @@ app = FastAPI(title="Timesheet Scoring Service", version="1.0")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_MODEL_PATHS = [
-    os.path.join(BASE_DIR, "halfthreshold_model.pkl"),
+    os.path.join(BASE_DIR, "models", "halfthreshold_model.pkl"),
     os.path.join(BASE_DIR, "halfthreshold_model.pkl"),
 ]
 
@@ -131,16 +131,37 @@ def _load_model() -> dict:
     if not isinstance(model, dict):
         raise ValueError(f"Model pickle must be a dict payload, got: {type(model)}")
 
-    if "rules" not in model or not isinstance(model["rules"], dict):
-        raise ValueError("Model payload missing 'rules' dict")
+    if "rules" not in model:
+        raise ValueError("Model payload missing 'rules'")
 
-    # Convert legacy rule objects -> dicts
-    converted_rules: Dict[Any, Dict[str, Any]] = {}
-    for k, v in model["rules"].items():
-        converted_rules[k] = _normalize_rule_obj(v)
-    model["rules"] = converted_rules
+    # Case 1: rules stored as dict (legacy)
+    if isinstance(model["rules"], dict):
+        converted_rules: Dict[Any, Dict[str, Any]] = {}
+        for k, v in model["rules"].items():
+            converted_rules[k] = _normalize_rule_obj(v)
+        model["rules"] = converted_rules
 
-    model["_model_file"] = model_file
+    # Case 2: rules stored as list of dicts (portable v2 from run_me.py)
+    elif isinstance(model["rules"], list):
+        rules_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+        for r in model["rules"]:
+            if not isinstance(r, dict):
+                raise ValueError(f"Rule in rules list is not a dict: {type(r)}")
+
+            emp = str(r.get("employee", "")).strip()
+            proj = str(r.get("project", "")).strip()
+            if not emp or not proj:
+                raise ValueError(f"Rule missing employee/project: {r}")
+
+            # Ensure it matches what _rule_flag expects (threshold + direction)
+            rr = _normalize_rule_obj(r)
+            rules_map[(emp, proj)] = rr
+
+        model["rules"] = rules_map
+
+    else:
+        raise ValueError("Model payload 'rules' must be dict or list")
 
     # Optional: write a clean pickle (dict-only rules) so next run won't need GroupRule
     try:
@@ -451,4 +472,3 @@ def run_script():
         }
     finally:
         _script_lock.release()
-
